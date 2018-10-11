@@ -1,5 +1,6 @@
 import enum
 import json
+
 from Crypto_Asset import *
 from Bittrex_API import *
 #from Huobi_Ws import *
@@ -13,107 +14,91 @@ class Order_Action(enum.Enum):
     Sell = 'sell' 
 
 class Listing_Order_Supervisor(Thread):
-    def __init__(self, cmc_assets, asset_working_with, markets_to_use):
+    def __init__(self, asset_working_with, markets_to_use): #, cmc_assets):
         Thread.__init__(self)
 
         self.lock = threading.Lock()
         self.market = markets_to_use[0]                 #TODO FIX for many markets in future!!!
         self.asset_working_with = asset_working_with
-        self.cmc_assets = cmc_assets
+        #self.cmc_assets = cmc_assets                   #decide if it is needed
         
         self.time_used = 15
         self.max_candle_percent_size = 0.03
         self.median_price_chage = 1.05
-        #self.max_price_loss = 0.24
+        self.max_price_loss = 0.24
         self.event = threading.Event()
-        
-        #self.ws_class = None
+ 
+    def wait_until_price_update():       
+        while self.market.market_api.balances_manager.price_updated == 0:
+            time.sleep(0.01)
+        self.market.market_api.balances_manager.price_updated = 0
 
     def run(self):
+        start = time.time()                                                                                 #Clean after
 
-        amount_to_invest = -1
-        invest_order = None
+        pair = self.market.market_api.get_traiding_pair(self.asset_working_with); 
+        analysis_result = self.analyze_market_situation(pair)
+
+        if analysis_result != True:
+            print("Dont wanna buy now, we are too late actually :( ")
+            return
 
         if self.market.direct_purchase == False:
-            amount_to_invest = self.sell_initial_asset()
-        else:
-            amount_to_invest = self.check_if_balance_is_enough()
+            self.sell_initial_asset()
 
-        #pair = self.asset_working_with.symbol.lower() + self.market.asset_buy_on #TODO same as above
-        self.market.market_api.update_markets()
-        pair = self.market.market_api.markets[self.asset_working_with.symbol.upper()][0][2]
+        self.wait_until_price_update()                                                                      #Move inside bittrex api?
 
-        print ('Buying listed asset, pair:', pair, 'invested amount:', amount_to_invest)
+        amount_to_invest = self.get_invest_amount()                                                         #TODO check it
+        print('Buying listed asset, pair:', pair, 'invested amount:', amount_to_invest)
+        invest_order = self.market.market_api.swap_assets('market', 'buy', pair, amount_to_invest)          #TODO buying asset
+        
+        end = time.time()                                                                                   #Clean after
+        print("time elapsed: ", end - start)
 
-        analysis_result = self.analyze_market_situation(pair)
-        print('Listing_Order_Supervisor::analysis_result:', analysis_result)
+        if self.market.market_api.check_order_placement_success(invest_order) != True:
+            print ('invest_order placement failure: ', invest_order)
+            exit()                                                                                          #TODO Error Hanling!!!
 
-        if analysis_result == True:
-
-            invest_order = self.market.market_api.swap_btc_asset('market', 'buy', pair, amount_to_invest)
-
-            if invest_order['success'] != True:
-                print (invest_order)
-                exit(0)
-                #TODO Error Hanling!!! 
-            else:
-                self.handle_opened_order(invest_order, pair)
-                self.market.market_api.update_balances()  
-
-                self.return_initial_asset()   
-        else:
-            print("Dont wanna buy now, we are too late actually :( ")
-
+        self.handle_opened_order(invest_order, pair)
+        
+        #if self.market.return_initial_asset == True:  
+        #    self.return_initial_asset()   
+                 
     def sell_initial_asset(self):
         print ("Selling initial asset...")
         swap_asset_balance = 0
-        self.market.market_api.update_balances()
-
-        try:
-            swap_asset_balance = float(self.market.market_api.balances[self.market.asset_to_swap][1])
-        except KeyError:
-            print('Swap asset balance is empty. ')
-            
-        print('Balance:', swap_asset_balance)
-        sell_amount = 0 
+   
+        swap_asset_balance = self.market.market_api.get_asset_balance(self.market.asset_to_swap) #by symbol!
         
         if swap_asset_balance == 0:
+            print('Swap asset balance is empty!') #TODO handle Error!
             exit(0)
 
+        print('Asset to swap balance:', swap_asset_balance)
+        
         if swap_asset_balance < self.market.amount_to_invest or self.market.amount_to_invest == -1:
-            sell_amount = swap_asset_balance
+            amount_to_sell = swap_asset_balance
         else:
-            sell_amount = self.market.amount_to_invest
-
-        #cmc_asset_struct = self.cmc_assets.find_asset(self.market.asset_to_swap)
-        #print('Asset to sell cmc :', cmc_asset_struct.name)
-        #sell_amount = self.round_amount_to_sell(cmc_asset_struct, sell_amount)
-
-        print ('Selling amount:', sell_amount)
+            amount_to_sell = self.market.amount_to_invest
+  
+        pair = self.market.market_api.get_traiding_pair(self.market.asset_to_swap); 
+        print('Asset to swap pair:', pair)
+        print ('Asset to swap selling amount:', amount_to_sell)                         #TODO get available precicion + min order value?
+  
+        swap_order = self.market.market_api.swap_assets('market', 'sell', pair, amount_to_sell)       
     
-        #pair = self.market.asset_to_swap + self.market.asset_buy_on     #TODO now its allways like naseth, but theoretically can be smth else and we have to modify pair name
-        self.market.market_api.update_markets()
-        pair = self.market.market_api.markets[self.market.asset_to_swap.upper()][0][2]
+        if self.market.market_api.check_order_placement_success(swap_order) != True:      #THINK IF NEEDED TO SAVE TIME
+            print ('invest_order placement failure: ', swap_order)
+            exit()                                                                        #TODO Error Hanling!!!
+        
+        # order_details = self.market.market_api.get_order_details(swap_order)            #THINK IF NEEDED TO SAVE TIME
 
-        print('Sending initital asset, pair:', pair)
-        swap_order = self.market.market_api.swap_btc_and_usdt('buy', sell_amount)
-    
-        self.market.market_api.update_balances()
+        # while self.market.market_api.check_order_open(order_details) == True:           #THINK IF NEEDED TO SAVE TIME
+        #     order_details = self.market.market_api.get_order_details(swap_order)
+        #     print('waiting sell initial asset order to close')
+        #     time.sleep(0.1)
 
-        if swap_order['success'] != True:
-            print('Error while selling: ', swap_order)
-            exit(0)
-            #TODO Error Hanling!!!!
-
-        #order_results = self.market.market_api.completed_order_info(swap_order['data'])            
-        #amount_to_invest = float(order_results['data'][0]['filled-amount']) * float(order_results['data'][0]['price']) 
-
-        #cmc_asset_struct = self.cmc_assets.find_asset(self.market.asset_buy_on)
-        #amount_to_invest = self.round_amount_to_sell(cmc_asset_struct, amount_to_invest)
-
-        #return amount_to_invest
-
-    def check_if_balance_is_enough(self):
+    def get_invest_amount(self):            #TODO replace market_api.balances[self.market.asset_buy_on][1]) on get_balance() call to API
         print('Checking balance...')
         if float(self.market.market_api.balances[self.market.asset_buy_on][1]) < self.market.amount_to_invest or self.market.amount_to_invest == -1:
             return float(self.market.market_api.balances[self.market.asset_buy_on][1])
@@ -153,52 +138,48 @@ class Listing_Order_Supervisor(Thread):
 
     def handle_opened_order(self, invest_order, pair):
 
-        invest_order_info = self.market.market_api.get_order(invest_order['result']['uuid'])
-        #check? 
+        invest_order_details = self.market.market_api.get_order_details(invest_order)
+        invest_price = self.market.market_api.get_order_price(invest_order_details)
 
-        #  File "/usr/lib64/python3.6/threading.py", line 916, in _bootstrap_inner
-        #     self.run()
-        #   File "/home/aserbin/Code/List_bot/listed_asset_order_supervisor.py", line 62, in run
-        #     self.handle_openswap_asset_balanceed_order(invest_order, pair)
-        #   File "/home/aserbin/Code/List_bot/listed_asset_order_supervisor.py", line 200, in handle_opened_order
-        #     invest_price = float(invest_order_info['data'][0]['price'])
-        # TypeError: 'NoneType' object is not subscriptable
+        self.wait_until_price_update()
 
+        sell_order_info = self.market.market_api.swap_assets('limit', 'sell', pair, -1, invest_price * 1.13)    #TODO self.market.stop_profit_percent
 
+        if self.market.market_api.check_order_placement_success(sell_order_info) != True:
+            print ('sell order error!! Returned: ', sell_order_info)
 
-        invest_price = float(invest_order_info['result']['PricePerUnit'])
+        order_details = self.market.market_api.get_order_details(sell_order_info)
 
-        #amount_to_sell = -1 #float(invest_order_info['data'][0]['filled-amount'])
-
-        sell_opened_order = self.market.market_api.swap_btc_asset('limit', 'sell', pair, invest_price * 1.23)
-
-        if sell_opened_order['success'] != True:
-            print(sell_opened_order)
-            #exit(0)
-
-        order_uuid = sell_opened_order['result']['uuid']
-
-        order_details = self.market.market_api.get_order(order_uuid)
-
-        #amount_to_sell =  self.round_amount_to_sell(self.asset_working_with, amount_to_sell)
-
-        #if amount_to_sell == 0:
-        #    return
-
-        #print('I will sell this amount of asset:', amount_to_sell)
-
-        #self.ws_class.add_subscriber(self.event)
-
-        while order_details['result']['IsOpen'] == True:
+        while self.market.market_api.check_order_open(order_details) == True:
+            order_details = self.market.market_api.get_order_details(sell_order_info)
             print('waiting order to close')
-            order_details = self.market.market_api.get_order(order_uuid)            
             time.sleep(5)
 
-            # self.event.clear()
-            # self.event.wait()
-           
-            # parsed_json = json.loads(self.ws_class.data)
-                    
+        # sell_opened_order_info = self.market.market_api.conditional_order(action='sell', pair, quantity=-1, price=invest_price*0.94, condition='LESS_THAN', invest_price*0.96)
+
+        # if self.market.market_api.check_order_placement_success(sell_opened_order_info) != True:
+        #     print('sell_opened_order failure:', sell_opened_order_info)
+        #     exit()
+
+        # order_details = self.market.market_api.get_order_details(sell_opened_order_info)
+        # max_price = 0
+
+        # while self.market.market_api.check_order_open(order_details) == True:
+            
+        #     currrent_price = self.market.market_api.get_ticker(pair, 'oneMin')['result'][0]['H']
+            
+        #     if max_price < current_price:
+        #         if current_price - max_price > 0.01*invest_price:
+        #             self.market.market_api.cancel_order(sell_opened_order_info)
+        #             sell_opened_order_info = self.market.market_api.conditional_order(action='sell', pair, quantity=-1, price=invest_price*(0.95 + invest_price/current_price - 1), 
+        #                                                                               condition='LESS_THAN', invest_price*(0.96 + invest_price/current_price - 1))
+
+        #         max_price = current_price
+
+        #     order_details = self.market.market_api.get_order_details(sell_opened_order_info)
+        #     print('waiting order to close')
+        #     time.sleep(0.5)
+  
             # current_price = parsed_json['tick']['close']
 
 
@@ -225,101 +206,53 @@ class Listing_Order_Supervisor(Thread):
 
             # print('current_price:', current_price, 'initial price:', invest_price, 'max_price:', max_price)
 
-        #self.ws_class.delete_subscriber(self.event)
-
-    def round_amount_to_sell(self, asset, amount):
-        asset_dollar_price = float(asset.price) 
-
-        multiplyer = 10
-        counter = 1
-        new_amount = 0
-
-        print ('Amount before rounding:', amount)
-
-        while 1:
-            if asset_dollar_price / multiplyer < 0.1:
-                print('Precision:', counter - 1, 'Asset $ price:', asset_dollar_price)
-                new_amount = self.round_down(float(amount), counter - 1)
-                break 
-            else:
-                multiplyer = multiplyer * 10
-                counter += 1
-
-        print ('Rounded amount:', new_amount)
-
-        return new_amount
-
-    def round_down(self, num, prec):
-        if isinstance(num, float):
-            s = str(num)
-            return float(s[:s.find('.') + prec + 1])
-        else:
-            raise ValueError
-
     def analyze_market_situation(self, pair):
 
-        market_ok = False
+        market_ok = True
+        current_price = self.market.market_api.get_current_price(pair)
+        sorted_order_prices = self.market.market_api.get_completed_orders(pair)
+        sorted_order_prices.sort()
 
-        current_price = self.market.market_api.get_ticker(pair)
-        
-        if current_price['success'] != True:
-            print ('Error::cant get current price:', current_price)
-            #TODO hanling ERRORRS!!
+        median_price = sorted_order_prices[int(len(sorted_order_prices)/2)]
+        max_price = sorted_order_prices[-1]
+        min_price = sorted_order_prices[0]
 
-        current_price = current_price['result']['Last']
-
-        minute_candles =  self.market.market_api.get_ticks('BTC-XRP', 'oneMin')#get_kline(symbol, Candle_Time.One_Min.value)
-
-        if minute_candles['success'] != True:
-            print ('Error::analyze_market_situation::minute_candles status:', minute_candles)
-            #TODO fix it somehow???
-
-        candles = minute_candles['result'][-self.time_used - 1:-1]
-        
-        biggest_candle = self.find_biggest_candle(candles)
-
-        if biggest_candle[1] < self.max_candle_percent_size * current_price:
-            market_ok = True
-        else:
-            market_ok = False
-
-        print ('Candles observation result:', market_ok, '\n Max candle:', biggest_candle[1], '\n 5prc of current price:', self.max_candle_percent_size * current_price)
-
-        median_price = self.find_median_price(candles)
-
-        if current_price < median_price * self.median_price_chage:
-            market_ok = market_ok and True
-        else:
+        if max_price - min_price > median_price * 0.07:
             market_ok = market_ok and False
-
-        print('Desision:', market_ok, '\nMedian price:', median_price, '\n Current price:', current_price, '\n Max price what is ok is', median_price * self.median_price_chage)
+            print("max_price - min_price > median_price * 0.07 : ", max_price - min_price, median_price * 0.07)
+            
+        if current_price > median_price * 1.035:
+            market_ok = market_ok and False
+            
+        print('Desision:', market_ok, '\nMedian price:', median_price, '\n Current price:', current_price, '\n Max price what is ok is', median_price * 1.035)
 
         return market_ok
-        
 
-    def find_median_price(self, candles):
-        list_search_in = []
+    # def round_amount_to_sell(self, asset, amount):
+    #     asset_dollar_price = float(asset.price) 
 
-        for i in range(self.time_used):
-            list_search_in.insert(0, candles[i]['C'])
+    #     multiplyer = 10
+    #     counter = 1
+    #     new_amount = 0
 
-        list_search_in.sort()
+    #     print ('Amount before rounding:', amount)
 
-        print('Listing_Order_Supervisor::find_median_price :', list_search_in[int(self.time_used / 2)])
+    #     while 1:
+    #         if asset_dollar_price / multiplyer < 0.1:
+    #             print('Precision:', counter - 1, 'Asset $ price:', asset_dollar_price)
+    #             new_amount = self.round_down(float(amount), counter - 1)
+    #             break 
+    #         else:
+    #             multiplyer = multiplyer * 10
+    #             counter += 1
 
-        return list_search_in[int(self.time_used / 2)]
+    #     print ('Rounded amount:', new_amount)
 
+    #     return new_amount
 
-    def find_biggest_candle(self, candles):
-
-        winner = float(candles[0]['C'] - candles[0]['O'])
-        winner_index = 0
-
-        for i in range(self.time_used):
-            if float(candles[i]['C'] - candles[i]['O']) >= winner:
-                winner_index = i 
-                winner = float(candles[i]['C'] - candles[i]['O'])
-
-        print('Listing_Order_Supervisor::find_biggest_candle :', candles[winner_index])
-
-        return (winner_index, winner)
+    # def round_down(self, num, prec):
+    #     if isinstance(num, float):
+    #         s = str(num)
+    #         return float(s[:s.find('.') + prec + 1])
+    #     else:
+    #         raise ValueError
